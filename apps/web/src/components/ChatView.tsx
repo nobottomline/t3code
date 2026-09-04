@@ -246,7 +246,10 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
-import { confirmTerminalClose, isTerminalCloseConfirmPending } from "../lib/terminalCloseConfirm";
+import {
+  confirmInspectedTerminalClose,
+  isTerminalCloseConfirmPending,
+} from "../lib/terminalCloseConfirm";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
 import {
@@ -876,16 +879,6 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     }
     return next;
   }, [drawerTerminalSessions]);
-  const terminalHasRunningSubprocessById = useMemo(
-    () =>
-      new Map(
-        drawerTerminalSessions.map((session) => [
-          session.target.terminalId,
-          session.state.hasRunningSubprocess,
-        ]),
-      ),
-    [drawerTerminalSessions],
-  );
   const terminalLaunchLocationsById = useMemo(() => {
     const next = new Map<
       string,
@@ -1181,7 +1174,6 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
           onHeightChange={setTerminalHeight}
           onAddTerminalContext={handleAddTerminalContext}
           terminalLabelsById={terminalLabelsById}
-          terminalHasRunningSubprocessById={terminalHasRunningSubprocessById}
           terminalLaunchLocationsById={terminalLaunchLocationsById}
         />
       </div>
@@ -1276,16 +1268,6 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
     }
     return labels;
   }, [knownTerminalSessions, surface.terminalIds]);
-  const terminalHasRunningSubprocessById = useMemo(
-    () =>
-      new Map(
-        knownTerminalSessions.map((session) => [
-          session.target.terminalId,
-          session.state.hasRunningSubprocess,
-        ]),
-      ),
-    [knownTerminalSessions],
-  );
   const terminalLaunchLocationsById = useMemo(() => {
     const locations = new Map<
       string,
@@ -1365,7 +1347,6 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
       onHeightChange={() => undefined}
       onAddTerminalContext={onAddTerminalContext}
       terminalLabelsById={terminalLabelsById}
-      terminalHasRunningSubprocessById={terminalHasRunningSubprocessById}
       terminalLaunchLocationsById={terminalLaunchLocationsById}
       keybindings={keybindings}
     />
@@ -1427,6 +1408,9 @@ export default function ChatView(props: ChatViewProps) {
   });
   const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
+  const inspectTerminalSubprocesses = useAtomCommand(terminalEnvironment.inspectSubprocesses, {
+    reportFailure: false,
+  });
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
@@ -1875,16 +1859,6 @@ export default function ChatView(props: ChatViewProps) {
     }
     return labels;
   }, [activeThreadKnownSessions]);
-  const activeTerminalHasRunningSubprocessById = useMemo(
-    () =>
-      new Map(
-        activeThreadKnownSessions.map((session) => [
-          session.target.terminalId,
-          session.state.hasRunningSubprocess,
-        ]),
-      ),
-    [activeThreadKnownSessions],
-  );
   const activeThreadRef = useMemo(
     () =>
       activeThreadEnvironmentId && activeThreadId
@@ -4418,27 +4392,39 @@ export default function ChatView(props: ChatViewProps) {
     },
     [activeRightPanelSurface, activeThreadRef, closeTerminalMutation, storeCloseTerminal],
   );
+  const confirmActiveTerminalClose = useCallback(
+    async (terminalIds: readonly [string, ...string[]]) => {
+      if (!activeThreadRef) return false;
+      return confirmInspectedTerminalClose({
+        terminalIds,
+        labelFor: (terminalId) =>
+          activeTerminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId),
+        inspect: async (ids) => {
+          const inspection = await inspectTerminalSubprocesses({
+            environmentId: activeThreadRef.environmentId,
+            input: { threadId: activeThreadRef.threadId, terminalIds: ids },
+          });
+          return inspection._tag === "Success" ? inspection.value.terminals : undefined;
+        },
+      });
+    },
+    [activeTerminalLabelsById, activeThreadRef, inspectTerminalSubprocesses],
+  );
   const requestCloseTerminal = useCallback(
     (terminalId: string) => {
-      const label = activeTerminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId);
-      void confirmTerminalClose([
-        { label, hasRunningSubprocess: activeTerminalHasRunningSubprocessById.get(terminalId) },
-      ]).then((confirmed) => {
+      void confirmActiveTerminalClose([terminalId]).then((confirmed) => {
         if (confirmed) closeTerminal(terminalId);
       });
     },
-    [activeTerminalHasRunningSubprocessById, activeTerminalLabelsById, closeTerminal],
+    [closeTerminal, confirmActiveTerminalClose],
   );
   const requestClosePanelTerminal = useCallback(
     (terminalId: string) => {
-      const label = activeTerminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId);
-      void confirmTerminalClose([
-        { label, hasRunningSubprocess: activeTerminalHasRunningSubprocessById.get(terminalId) },
-      ]).then((confirmed) => {
+      void confirmActiveTerminalClose([terminalId]).then((confirmed) => {
         if (confirmed) closePanelTerminal(terminalId);
       });
     },
-    [activeTerminalHasRunningSubprocessById, activeTerminalLabelsById, closePanelTerminal],
+    [closePanelTerminal, confirmActiveTerminalClose],
   );
   const activateRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
@@ -4556,31 +4542,19 @@ export default function ChatView(props: ChatViewProps) {
         finishClose();
         return;
       }
-      const otherTargets = surface.terminalIds
-        .filter((terminalId) => terminalId !== surface.activeTerminalId)
-        .map((terminalId) => ({
-          label: activeTerminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId),
-          hasRunningSubprocess: activeTerminalHasRunningSubprocessById.get(terminalId),
-        }));
-      void confirmTerminalClose([
-        {
-          label:
-            activeTerminalLabelsById.get(surface.activeTerminalId) ??
-            getTerminalLabel(surface.activeTerminalId),
-          hasRunningSubprocess: activeTerminalHasRunningSubprocessById.get(
-            surface.activeTerminalId,
-          ),
+      const otherTerminalIds = surface.terminalIds.filter(
+        (terminalId) => terminalId !== surface.activeTerminalId,
+      );
+      void confirmActiveTerminalClose([surface.activeTerminalId, ...otherTerminalIds]).then(
+        (confirmed) => {
+          if (confirmed) finishClose();
         },
-        ...otherTargets,
-      ]).then((confirmed) => {
-        if (confirmed) finishClose();
-      });
+      );
     },
     [
       activeThreadRef,
-      activeTerminalHasRunningSubprocessById,
-      activeTerminalLabelsById,
       closeAfterAgentBrowserConfirmation,
+      confirmActiveTerminalClose,
       finishRightPanelSurfaceClose,
     ],
   );
