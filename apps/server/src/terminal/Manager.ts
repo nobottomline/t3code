@@ -1429,6 +1429,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
   });
 });
 
+/** Construct a terminal manager from explicit host and process adapters. */
 export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(function* (
   options: TerminalManagerOptions,
 ) {
