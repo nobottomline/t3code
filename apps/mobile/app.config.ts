@@ -11,13 +11,48 @@ Object.assign(process.env, repoEnv);
 process.env.EXPO_NO_TYPESCRIPT_SETUP = "1";
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
+const isIos17Build = repoEnv.T3CODE_IOS17_BUILD === "1";
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
-const runtimeVersionPolicy =
-  process.env.MOBILE_VERSION_POLICY ??
-  (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
+const runtimeVersionPolicy = isIos17Build
+  ? "fingerprint"
+  : (process.env.MOBILE_VERSION_POLICY ??
+    (APP_VARIANT === "development" ? "appVersion" : "fingerprint"));
 
-const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
+const upstreamProjectId = "d763fcb8-d37c-41ea-a773-b54a0ab4a454";
+const ios17ProjectId = repoEnv.T3CODE_IOS17_EXPO_PROJECT_ID?.trim();
+const ios17ExpoOwner = repoEnv.T3CODE_IOS17_EXPO_OWNER?.trim();
+const ios17ExpoSlug = repoEnv.T3CODE_IOS17_EXPO_SLUG?.trim();
+const ios17BundleIdentifier = repoEnv.T3CODE_IOS17_BUNDLE_ID?.trim();
+
+const personalTeamBundleIdentifier =
+  repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim() ||
+  (isIos17Build ? ios17BundleIdentifier : undefined);
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+const EXPO_PROJECT_ID_PATTERN = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+
+if (
+  isIos17Build &&
+  (ios17ProjectId || ios17ExpoOwner || ios17ExpoSlug) &&
+  (!ios17ProjectId ||
+    !EXPO_PROJECT_ID_PATTERN.test(ios17ProjectId) ||
+    ios17ProjectId.toLowerCase() === upstreamProjectId ||
+    !ios17ExpoOwner ||
+    !ios17ExpoSlug)
+) {
+  throw new Error(
+    "Set T3CODE_IOS17_EXPO_PROJECT_ID, T3CODE_IOS17_EXPO_OWNER, and T3CODE_IOS17_EXPO_SLUG to your own Expo project.",
+  );
+}
+
+if (
+  isIos17Build &&
+  ios17BundleIdentifier &&
+  !IOS_BUNDLE_IDENTIFIER_PATTERN.test(ios17BundleIdentifier)
+) {
+  throw new Error("T3CODE_IOS17_BUNDLE_ID must be a reverse-DNS identifier.");
+}
+
+const updateProjectId = isIos17Build ? ios17ProjectId : upstreamProjectId;
 
 // Compiled into the native project. Without a relay, Observe's native side could dispatch to
 // Expo's own ingest before observe.ts turns it off; `.invalid` never resolves (RFC 6761).
@@ -122,7 +157,9 @@ const variant = VARIANT_CONFIG[APP_VARIANT];
 const HOSTED_APP_HOST = "app.t3.codes";
 const iosBundleIdentifier = isIosPersonalTeamBuild
   ? personalTeamBundleIdentifier!
-  : variant.iosBundleIdentifier;
+  : isIos17Build
+    ? (ios17BundleIdentifier ?? "local.t3code.ios17")
+    : variant.iosBundleIdentifier;
 
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
@@ -234,8 +271,8 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 
 const config: ExpoConfig = {
   name: variant.appName,
-  slug: "t3-code",
-  platforms: ["ios", "android"],
+  slug: isIos17Build ? (ios17ExpoSlug ?? "t3-code-ios17") : "t3-code",
+  platforms: isIos17Build ? ["ios"] : ["ios", "android"],
   scheme: variant.scheme,
   version: repoEnv.T3CODE_MOBILE_VERSION ?? "2.3.0",
   runtimeVersion: {
@@ -246,8 +283,9 @@ const config: ExpoConfig = {
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
   updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+    enabled: Boolean(updateProjectId) && repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
+    ...(updateProjectId ? { url: `https://u.expo.dev/${updateProjectId}` } : {}),
+    ...(isIos17Build ? { requestHeaders: { "expo-channel-name": "ios17" } } : {}),
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
   },
@@ -257,14 +295,20 @@ const config: ExpoConfig = {
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
     // Avoid Personal Team fallback: it cannot sign App Groups, Apple sign-in or push entitlements.
-    appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-      `applinks:${HOSTED_APP_HOST}`,
-    ],
+    appleTeamId: isIos17Build ? repoEnv.T3CODE_IOS17_APPLE_TEAM_ID?.trim() : "ARK85ZXQ4Z",
+    ...(isIos17Build
+      ? {}
+      : {
+          associatedDomains: [
+            `applinks:${variant.relyingParty}`,
+            `webcredentials:${variant.relyingParty}`,
+            `applinks:${HOSTED_APP_HOST}`,
+          ],
+        }),
     entitlements: {
-      "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
+      "keychain-access-groups": [
+        `$(AppIdentifierPrefix)${isIos17Build ? iosBundleIdentifier : variant.iosBundleIdentifier}`,
+      ],
     },
     infoPlist: {
       UISupportedInterfaceOrientations: [
@@ -368,6 +412,7 @@ const config: ExpoConfig = {
         icon: variant.assets.androidNotificationIcon,
         color: variant.assets.androidNotificationColor,
         mode: APP_VARIANT === "development" ? "development" : "production",
+        ...(isIosPersonalTeamBuild ? { enableRemoteNotifications: false } : {}),
       },
     ],
     // Gate Clerk here: withoutIosPersonalTeamCapabilities runs too early to strip its entitlement.
@@ -444,7 +489,7 @@ const config: ExpoConfig = {
           ].join("\n"),
         },
         ios: {
-          deploymentTarget: "18.0",
+          deploymentTarget: isIos17Build ? "17.0" : "18.0",
           // AppCheckCore 11.3+ includes Swift and needs module maps for these Objective-C dependencies.
           extraPods: [
             { name: "GoogleUtilities", modular_headers: true },
@@ -490,11 +535,11 @@ const config: ExpoConfig = {
       tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN ?? null,
     },
     eas: {
-      projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+      projectId: updateProjectId,
       observe: { endpointUrl: observeEndpointUrl },
     },
   },
-  owner: "pingdotgg",
+  owner: isIos17Build ? ios17ExpoOwner : "pingdotgg",
   experiments: {
     // Metro only runs babel-plugin-react-compiler when this is set; see src/reactCompilerCoverage.test.ts.
     reactCompiler: true,

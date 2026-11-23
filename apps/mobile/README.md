@@ -128,6 +128,49 @@ node ../../scripts/mobile-native-static-check.ts
 
 The native lint task runs SwiftLint for Swift plus ktlint and detekt for Kotlin. Missing native tools are reported as warnings and skipped locally. CI installs the default toolset from `apps/mobile/Brewfile` before running the native checks.
 
+## iOS 17 standalone Release
+
+From the repository root, run `pnpm install --frozen-lockfile --filter=@t3tools/mobile...`.
+From `apps/mobile`, use Xcode 27.2 and CocoaPods to compile an arm64 Simulator build. The generated
+project and the local native modules target iOS 17.0.
+
+```bash
+export T3CODE_IOS17_BUILD=1 APP_VARIANT=production
+export EXPO_NO_GIT_STATUS=1
+./node_modules/.bin/expo prebuild --clean --platform ios --no-install
+(cd ios && pod install)
+xcodebuild -workspace ios/T3Code.xcworkspace -scheme T3Code -configuration Release \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/t3code-ios17-sim \
+  CODE_SIGN_IDENTITY=- ARCHS=arm64 build
+```
+
+Xcode signs the Simulator build ad hoc and embeds the entitlements that SecureStore uses. The
+app contains its JavaScript bundle and launches without Metro. For a physical device,
+set `T3CODE_IOS17_BUNDLE_ID` to your registered app identifier and `T3CODE_IOS17_APPLE_TEAM_ID` to
+your team ID before prebuild. In Xcode, select the device and run the scheme in the Release
+configuration with your provisioning profiles. For a Personal Team or a wildcard profile, set
+`T3CODE_IOS_PERSONAL_TEAM=1` before prebuild. This variant supports local notifications and omits
+the widget and share extensions, remote notifications, and native Sign in with Apple.
+
+### Expo Update for iOS 17
+
+Set `T3CODE_IOS17_EXPO_OWNER`, `T3CODE_IOS17_EXPO_SLUG`, and `T3CODE_IOS17_EXPO_PROJECT_ID`
+to the account name, slug, and project UUID of your Expo project. Use those values and
+`T3CODE_IOS17_BUILD=1 APP_VARIANT=production` for prebuild, Release, and OTA. The generated build
+uses the `ios17` channel, with `fingerprint` as its runtime policy. Builds without a configured
+project launch the embedded bundle with updates disabled.
+
+In the Expo dashboard, link the `ios17` channel to the update branch for this build. After a
+JavaScript or asset change, generate the iOS fingerprint using the same Expo environment as the
+build. Compare `.hash` with the runtime version packaged in the Release app before publishing.
+Read `EXUpdatesRuntimeVersion` in the app's `Expo.plist`. If it says `file:fingerprint`, read
+`EXUpdates.bundle/fingerprint` inside the app. Rebuild and reinstall if the fingerprint differs.
+
+```bash
+eas fingerprint:generate --platform ios --environment production --json
+eas update --channel ios17 --platform ios --environment production --message 'Describe the change'
+```
+
 ## EAS Builds
 
 Preview and production variants use Expo fingerprinting so OTA updates only reach binaries with matching native dependencies, config plugins, and patches. CI uses the `preview:dev` profile to reuse a compatible native build when possible.
